@@ -1,7 +1,7 @@
 import cv2
 import matplotlib.pyplot as plt
 
-img_path = r'C:\Users\20230\Desktop\RobotCourse\photo1.png'
+img_path = r'C:\Users\20230\Desktop\RobotCourse\experiment1\photo1.png'
 img = cv2.imread(img_path)
 
 img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)

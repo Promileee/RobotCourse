@@ -1,6 +1,6 @@
 import cv2
 import numpy as np
-from process import (
+from process2 import (
 	binary_manual,
 	gray_level_manual,
 	gamma_transform,

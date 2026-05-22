@@ -2,7 +2,7 @@ import cv2
 import numpy as np
 import matplotlib.pyplot as plt
 from pathlib import Path
-from process import (
+from process2 import (
 	binary_manual,
 	gray_level_manual,
 	gamma_transform,
@@ -109,7 +109,8 @@ def main():
 			ax.axis('off')
 
 	plt.tight_layout()
-	plt.savefig('results.pdf')
+	plt.savefig('experiment2/results.pdf')
+	plt.show()	
 
 
 

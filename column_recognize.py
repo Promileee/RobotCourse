@@ -3,9 +3,9 @@ import numpy as np
 from openni import openni2
 
 # --- HSV ranges for red, blue, green ---
-LOWER_RED1 = np.array([0, 120, 70])
-UPPER_RED1 = np.array([10, 255, 255])
-LOWER_RED2 = np.array([170, 120, 70])
+LOWER_RED1 = np.array([0, 100, 50])
+UPPER_RED1 = np.array([15, 255, 255])
+LOWER_RED2 = np.array([160, 100, 50])
 UPPER_RED2 = np.array([180, 255, 255])
 
 LOWER_BLUE = np.array([100, 120, 70])
@@ -21,6 +21,7 @@ COLORS = {
 }
 
 DEPTH_MAX = 1300  # only detect within 1300mm
+DEPTH_RATIO = 0.2  # at least 20% of rect area must be within depth range
 
 # --- RGB camera ---
 cap = cv2.VideoCapture(0)
@@ -62,18 +63,16 @@ while True:
     result = frame.copy()
 
     for name, (color_bgr, range1, range2) in COLORS.items():
-        mask = cv2.inRange(hsv, range1[0], range1[1])
+        color_mask = cv2.inRange(hsv, range1[0], range1[1])
         if range2 is not None:
             mask2 = cv2.inRange(hsv, range2[0], range2[1])
-            mask = cv2.bitwise_or(mask, mask2)
+            color_mask = cv2.bitwise_or(color_mask, mask2)
 
-        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones((5, 5), np.uint8))
-        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones((5, 5), np.uint8))
+        color_mask = cv2.morphologyEx(color_mask, cv2.MORPH_OPEN, np.ones((5, 5), np.uint8))
+        color_mask = cv2.morphologyEx(color_mask, cv2.MORPH_CLOSE, np.ones((5, 5), np.uint8))
 
-        # Combine color mask with depth mask
-        mask = cv2.bitwise_and(mask, depth_mask)
-
-        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        # Find contours from color mask only (no depth filtering yet)
+        contours, _ = cv2.findContours(color_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
         for cnt in contours:
             area = cv2.contourArea(cnt)
@@ -83,6 +82,23 @@ while True:
             x, y, w, h = cv2.boundingRect(cnt)
             aspect_ratio = w / float(h)
             if not (0.2 < aspect_ratio < 5.0):
+                continue
+
+            # Check depth coverage: what % of this rect's color pixels are within depth range
+            x1, y1 = max(x, 0), max(y, 0)
+            x2, y2 = min(x + w, color_mask.shape[1]), min(y + h, color_mask.shape[0])
+            if x2 <= x1 or y2 <= y1:
+                continue
+
+            roi_color = color_mask[y1:y2, x1:x2]
+            roi_depth = depth_mask[y1:y2, x1:x2]
+            color_pixels = cv2.countNonZero(roi_color)
+            if color_pixels == 0:
+                continue
+            in_range_pixels = cv2.countNonZero(cv2.bitwise_and(roi_color, roi_depth))
+            depth_ratio = in_range_pixels / color_pixels
+
+            if depth_ratio < DEPTH_RATIO:
                 continue
 
             # Center of the rectangle
@@ -97,7 +113,13 @@ while True:
             cv2.putText(result, label, (x, y - 8),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.5, color_bgr, 2)
 
+    # Depth colormap for visualization
+    depth_vis = cv2.normalize(np.clip(dpt, 0, DEPTH_MAX), None, 0, 255,
+                              cv2.NORM_MINMAX, dtype=cv2.CV_8U)
+    depth_vis = cv2.applyColorMap(depth_vis, cv2.COLORMAP_JET)
+
     cv2.imshow("Result", result)
+    cv2.imshow("Depth", depth_vis)
 
     if cv2.waitKey(1) == ord("q"):
         break

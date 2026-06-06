@@ -1,7 +1,7 @@
 """
-靶标识别与追踪模块 (加入高鲁棒性时域滤波)
+靶标识别与追踪模块
 基于ORB特征匹配和极坐标旋转估计的刚体追踪系统。
-结合了 EMA 平滑与异常帧剔除，保障电机闭环控制的绝对稳定性。
+用于识别和追踪红、绿、蓝三色靶标构成的等边三角形成像星座。
 
 使用方法:
     from camera_manager import CameraManager
@@ -21,13 +21,15 @@ from camera_manager import CameraManager
 
 
 # ==========================================
-# 几何与追踪约束阈值
+# 几何约束阈值
 # ==========================================
 TOL_SQUARE = 15
 TOL_SIZE = 15
 TOL_TRIANGLE = 20
 MASK_SCALE = 1.25
 MEDIAN_KSIZE = 5
+MAX_FRAME_SHIFT = 10
+MAX_FRAME_SHIFT_RELAX = 20
 TOL_TRIANGLE_TRACK = 8
 MAX_TRI_FAIL = 7
 
@@ -70,59 +72,6 @@ def estimate_rotation_angle(sig_ref, sig_cur):
     return float(-lag)
 
 
-class ConstellationTemporalTracker:
-    """星座时域追踪器：EMA平滑 + 刚体异常帧剔除"""
-    
-    def __init__(self, alpha=0.35, max_jump=40):
-        """
-        :param alpha: 平滑系数 (0~1)。电机控制建议取 0.3~0.5 之间，平衡平滑度与响应延迟。
-        :param max_jump: 允许的最大单帧像素跳跃距离，超过即判定特征匹配崩溃，剔除该帧。
-        """
-        self.alpha = alpha
-        self.max_jump = max_jump
-        self.history = None
-
-    def update(self, measurements):
-        """输入当前帧三个靶标的测量坐标，输出滤波后的稳定坐标"""
-        if measurements is None:
-            return None
-
-        # 第一帧初始化
-        if self.history is None:
-            self.history = measurements.copy()
-            return self.history.copy()
-
-        filtered = {}
-        is_outlier = False
-
-        # 1. 异常点剔除逻辑
-        # 因为三个靶标是刚体星座，如果其中任何一个点发生瞬时漂移(大概率是矩阵解算错乱)，
-        # 整体应当被判定为异常帧，直接沿用历史稳定位置。
-        for color, (cx, cy) in measurements.items():
-            hx, hy = self.history[color]
-            if get_distance((cx, cy), (hx, hy)) > self.max_jump:
-                is_outlier = True
-                break
-
-        if is_outlier:
-            return self.history.copy()
-
-        # 2. 指数移动平均 (EMA) 平滑
-        for color, (cx, cy) in measurements.items():
-            hx, hy = self.history[color]
-            fx = self.alpha * cx + (1 - self.alpha) * hx
-            fy = self.alpha * cy + (1 - self.alpha) * hy
-            filtered[color] = (int(fx), int(fy))
-
-        # 更新历史并返回
-        self.history = filtered.copy()
-        return filtered
-
-    def reset(self):
-        """重置历史状态"""
-        self.history = None
-
-
 class TargetRecognizer:
     """靶标识别与追踪器"""
 
@@ -143,7 +92,7 @@ class TargetRecognizer:
         self.ref_angular_sig = None
         self.mask = None
 
-        # HSV颜色范围与绘图颜色
+        # HSV颜色范围
         self.hsv_ranges = {
             "Red": [(np.array([0, 50, 50]), np.array([15, 255, 255])),
                     (np.array([160, 50, 50]), np.array([180, 255, 255]))],
@@ -152,18 +101,19 @@ class TargetRecognizer:
         }
         self.colors_bgr = {"Red": (0, 0, 255), "Green": (0, 255, 0), "Blue": (255, 0, 0)}
 
-        # 追踪状态与时域滤波器
         self.current_targets = None
+        self.prev_targets = None
+        self.was_constrained = False
         self.consecutive_tri_fail = 0
         self.depth_map = None
-        self.tracker = ConstellationTemporalTracker(alpha=0.35, max_jump=40)
 
     # ==========================================
     # 相机管理
     # ==========================================
     def setup(self, camera_manager=None):
+        """绑定相机管理器。若为 None 则自动创建一个 (独立调试用)。"""
         if self.cam is not None:
-            return 
+            return  # 已绑定，避免重复初始化
         if camera_manager is None:
             self.cam = CameraManager()
             self.cam.start()
@@ -171,15 +121,18 @@ class TargetRecognizer:
             self.cam = camera_manager
 
     def read_rgb_frame(self):
+        """读取RGB帧 (委托给 CameraManager)"""
         return self.cam.read_rgb_frame()
 
     def get_depth_map(self):
+        """读取深度帧并返回深度图 (委托给 CameraManager)"""
         return self.cam.get_depth_map()
 
     # ==========================================
     # 图像预处理
     # ==========================================
     def preprocess(self, frame):
+        """对帧进行自适应二值化 + 形态学去噪"""
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         gray = cv2.medianBlur(gray, MEDIAN_KSIZE)
         binary = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
@@ -188,6 +141,7 @@ class TargetRecognizer:
         return gray, binary
 
     def preprocess_edges(self, gray):
+        """Canny边缘检测"""
         blurred = cv2.GaussianBlur(gray, (3, 3), 0)
         return cv2.Canny(blurred, 40, 120)
 
@@ -195,6 +149,7 @@ class TargetRecognizer:
     # Phase 1: 严苛初始化捕获
     # ==========================================
     def find_target_candidates(self, edges):
+        """从边缘图中找到候选靶标区域"""
         contours, _ = cv2.findContours(edges, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
 
         bboxes = []
@@ -227,6 +182,7 @@ class TargetRecognizer:
                     tcx, tcy = min_x + tw // 2, min_y + th // 2
                     target_candidates.append((min_x, min_y, tw, th, tcx, tcy))
 
+        # NMS: 按面积排序，移除被已选区域包含的候选
         final_targets = []
         target_candidates.sort(key=lambda b: b[2] * b[3], reverse=True)
         for cand in target_candidates:
@@ -238,6 +194,7 @@ class TargetRecognizer:
         return final_targets
 
     def identify_colors(self, frame, final_targets):
+        """识别每个候选区域的颜色 (Red/Green/Blue)"""
         hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
         identified = {}
 
@@ -262,20 +219,24 @@ class TargetRecognizer:
         return identified
 
     def validate_geometry(self, identified):
+        """验证三靶标的几何约束: 正方形、尺寸一致、等边三角形"""
         if len(identified) != 3 or not all(c in identified for c in ["Red", "Green", "Blue"]):
             return False
 
         tr, tg, tb = identified["Red"], identified["Green"], identified["Blue"]
 
+        # 正方形约束
         max_sq_diff = max(abs(tr[2] - tr[3]), abs(tg[2] - tg[3]), abs(tb[2] - tb[3]))
         if max_sq_diff > TOL_SQUARE:
             return False
 
+        # 尺寸一致约束
         ws, hs = [tr[2], tg[2], tb[2]], [tr[3], tg[3], tb[3]]
         max_size_diff = max(max(ws) - min(ws), max(hs) - min(hs))
         if max_size_diff > TOL_SIZE:
             return False
 
+        # 等边三角形约束
         d_rg = get_distance((tr[4], tr[5]), (tg[4], tg[5]))
         d_gb = get_distance((tg[4], tg[5]), (tb[4], tb[5]))
         d_br = get_distance((tb[4], tb[5]), (tr[4], tr[5]))
@@ -286,6 +247,7 @@ class TargetRecognizer:
         return True
 
     def capture_initial_targets(self):
+        """Phase 1: 严苛的初始化捕获循环，返回 confirmed_targets"""
         print("\n开始执行严苛的初始帧捕获逻辑...")
         cv2.namedWindow("Initialization")
 
@@ -296,7 +258,7 @@ class TargetRecognizer:
                 continue
 
             frame_count += 1
-            _ = self.get_depth_map()
+            _ = self.get_depth_map()  # consume depth frame
 
             gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
             binary = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
@@ -306,6 +268,7 @@ class TargetRecognizer:
             final_targets = self.find_target_candidates(edges)
             identified = self.identify_colors(frame, final_targets)
 
+            # 可视化
             preview_img = frame.copy()
             cv2.putText(preview_img, f"Searching... Frame: {frame_count}",
                         (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
@@ -315,6 +278,7 @@ class TargetRecognizer:
             cv2.imshow("Init Binary", binary_clean)
             cv2.waitKey(1)
 
+            # 严苛校验
             if not self.validate_geometry(identified):
                 continue
 
@@ -327,17 +291,22 @@ class TargetRecognizer:
     # Phase 2: 构建ORB星座模板
     # ==========================================
     def build_template(self, frame, confirmed_targets):
+        """Phase 2: 基于捕获的靶标构建ORB特征模板"""
         print("正在构建星座模板与特征库...")
         self.ref_frame = frame.copy()
 
-        pts = np.array([[data[4], data[5]] for _, data in confirmed_targets.items()], dtype=np.float32)
+        # 计算最小外接圆
+        pts = np.array([[data[4], data[5]] for _, data in confirmed_targets.items()],
+                       dtype=np.float32)
         (center_x, center_y), strict_radius = cv2.minEnclosingCircle(pts)
         self.ref_mask_center = (int(center_x), int(center_y))
         self.ref_mask_radius = int(strict_radius * MASK_SCALE)
 
+        # 生成模板遮罩
         self.mask = np.zeros(self.ref_frame.shape[:2], dtype=np.uint8)
         cv2.circle(self.mask, self.ref_mask_center, self.ref_mask_radius, 255, -1)
 
+        # 提取参考特征
         ref_gray = cv2.cvtColor(self.ref_frame, cv2.COLOR_BGR2GRAY)
         ref_gray = cv2.medianBlur(ref_gray, MEDIAN_KSIZE)
         self.ref_binary = cv2.adaptiveThreshold(ref_gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
@@ -347,12 +316,15 @@ class TargetRecognizer:
         self.ref_targets_centers = {color: (data[4], data[5])
                                      for color, data in confirmed_targets.items()}
 
-        self.ref_angular_sig = extract_angular_signature(self.ref_binary, self.ref_mask_center,
+        # 提取参考角度签名
+        self.ref_angular_sig = extract_angular_signature(self.ref_binary,
+                                                          self.ref_mask_center,
                                                           self.ref_mask_radius)
 
-        # 重置时域滤波器并注入初始值
-        self.tracker.reset()
-        self.current_targets = self.tracker.update(self.ref_targets_centers)
+        # 初始化追踪状态
+        self.current_targets = self.ref_targets_centers.copy()
+        self.prev_targets = self.ref_targets_centers.copy()
+        self.was_constrained = False
         self.consecutive_tri_fail = 0
 
         print(f"模板构建完毕，共提取 {len(self.ref_kp)} 个特征点。")
@@ -362,8 +334,10 @@ class TargetRecognizer:
     # Phase 3: 实时追踪
     # ==========================================
     def track_frame(self, frame, binary):
+        """追踪单帧，返回 (success, targets_dict, result_img, rot_angle, affine_angle)"""
         result_img = frame.copy()
-        cur_angular_sig = extract_angular_signature(binary, self.ref_mask_center, self.ref_mask_radius)
+        cur_angular_sig = extract_angular_signature(binary, self.ref_mask_center,
+                                                     self.ref_mask_radius)
         rot_angle = estimate_rotation_angle(self.ref_angular_sig, cur_angular_sig)
 
         kp, des = self.orb.detectAndCompute(binary, self.mask)
@@ -376,33 +350,47 @@ class TargetRecognizer:
             good_matches = matches[:max(10, int(len(matches) * 0.2))]
 
             if len(good_matches) >= 10:
-                src_pts = np.float32([self.ref_kp[m.queryIdx].pt for m in good_matches]).reshape(-1, 1, 2)
-                dst_pts = np.float32([kp[m.trainIdx].pt for m in good_matches]).reshape(-1, 1, 2)
+                src_pts = np.float32([self.ref_kp[m.queryIdx].pt for m in good_matches]
+                                     ).reshape(-1, 1, 2)
+                dst_pts = np.float32([kp[m.trainIdx].pt for m in good_matches]
+                                     ).reshape(-1, 1, 2)
 
                 M, inliers = cv2.estimateAffinePartial2D(src_pts, dst_pts, cv2.RANSAC)
 
                 if M is not None:
-                    raw_new_targets = {}
+                    new_targets = {}
                     for color, (orig_cx, orig_cy) in self.ref_targets_centers.items():
                         nx = M[0, 0] * orig_cx + M[0, 1] * orig_cy + M[0, 2]
                         ny = M[1, 0] * orig_cx + M[1, 1] * orig_cy + M[1, 2]
-                        raw_new_targets[color] = (int(nx), int(ny))
+                        new_targets[color] = (int(nx), int(ny))
 
-                    # 基础的物理边界约束：防止坐标溢出计算圈
+                    # 帧间位移约束
+                    effective_max_shift = (MAX_FRAME_SHIFT_RELAX if self.was_constrained
+                                           else MAX_FRAME_SHIFT)
+                    frame_constrained = False
+                    for color in new_targets:
+                        px, py = self.prev_targets[color]
+                        nx, ny = new_targets[color]
+                        if get_distance((px, py), (nx, ny)) > effective_max_shift:
+                            new_targets[color] = (px, py)
+                            frame_constrained = True
+                    self.was_constrained = frame_constrained
+
+                    # 圆周约束
                     mc_x, mc_y = self.ref_mask_center
-                    for color in raw_new_targets:
-                        nx, ny = raw_new_targets[color]
+                    for color in new_targets:
+                        nx, ny = new_targets[color]
                         if get_distance((mc_x, mc_y), (nx, ny)) > self.ref_mask_radius * 0.85:
                             dx, dy = nx - mc_x, ny - mc_y
                             dist = math.hypot(dx, dy) + 1e-8
                             scale = (self.ref_mask_radius * 0.85) / dist
-                            raw_new_targets[color] = (int(mc_x + dx * scale), int(mc_y + dy * scale))
+                            new_targets[color] = (int(mc_x + dx * scale),
+                                                  int(mc_y + dy * scale))
 
-                    # === 引入核心的时域滤波器，替代原先简单的帧间约束 ===
-                    self.current_targets = self.tracker.update(raw_new_targets)
                     tracking_success = True
+                    self.current_targets = new_targets
 
-        # 正三角形约束 (基于滤波后的平滑坐标进行判断)
+        # 正三角形约束
         if tracking_success:
             target_pts = [(cx, cy) for cx, cy in self.current_targets.values()]
             if len(target_pts) == 3:
@@ -410,7 +398,6 @@ class TargetRecognizer:
                 d12 = get_distance(target_pts[1], target_pts[2])
                 d20 = get_distance(target_pts[2], target_pts[0])
                 tri_diff = max(d01, d12, d20) - min(d01, d12, d20)
-                
                 if tri_diff > TOL_TRIANGLE_TRACK:
                     self.consecutive_tri_fail += 1
                     if self.consecutive_tri_fail >= MAX_TRI_FAIL:
@@ -449,6 +436,8 @@ class TargetRecognizer:
             if len(pts) == 3:
                 cv2.polylines(result_img, [np.array(pts)], isClosed=True,
                               color=(255, 255, 255), thickness=1)
+
+            self.prev_targets = self.current_targets.copy()
         else:
             cv2.putText(result_img, "TRACKING LOST!", (10, 30),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
@@ -456,6 +445,7 @@ class TargetRecognizer:
         return tracking_success, self.current_targets, result_img, rot_angle, affine_angle
 
     def track_loop(self):
+        """Phase 3: 实时追踪主循环 (阻塞，按q退出或追踪失败返回False)"""
         print("进入实时追踪！按 q 退出。\n")
         cv2.namedWindow("Constellation Tracking")
         cv2.namedWindow("Tracking Binary (Masked)")
@@ -475,6 +465,7 @@ class TargetRecognizer:
                 cv2.destroyAllWindows()
                 return False
 
+            # 绘制特征计算圈内的二值化内容
             binary_masked = np.zeros_like(binary)
             cv2.circle(binary_masked, self.ref_mask_center, self.ref_mask_radius, 255, -1)
             binary_masked = cv2.bitwise_and(binary, binary_masked)
@@ -482,7 +473,7 @@ class TargetRecognizer:
             cv2.imshow("Constellation Tracking", result_img)
             cv2.imshow("Tracking Binary (Masked)", binary_masked)
             if cv2.waitKey(1) == ord("q"):
-                return True 
+                return True  # 用户主动退出
 
         return False
 
@@ -490,15 +481,19 @@ class TargetRecognizer:
     # 便捷方法：自动完成全套流程
     # ==========================================
     def run_full_pipeline(self):
+        """运行完整的 初始化→模板构建→追踪 流程，支持追踪失败后自动重试"""
         self.setup()
 
         while True:
+            # Phase 1
             frame, targets = self.capture_initial_targets()
             if frame is None:
                 break
 
+            # Phase 2
             self.build_template(frame, targets)
 
+            # Phase 3 (track_loop 返回 True=用户退出, False=需要重新初始化)
             user_quit = self.track_loop()
             if user_quit:
                 break
@@ -506,6 +501,7 @@ class TargetRecognizer:
         self.release()
 
     def release(self):
+        """释放相机资源 (委托给 CameraManager)"""
         if self.cam is not None:
             self.cam.release()
             self.cam = None

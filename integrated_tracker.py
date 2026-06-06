@@ -27,7 +27,7 @@ from camera_manager import CameraManager
 CYLINDER_DEPTH_MAX = 1300
 CYLINDER_DEPTH_RATIO = 0.2
 CYLINDER_MIN_AREA = 500
-MASK_EXPAND = 15  # 黑名单遮罩向外膨胀的像素，彻底屏蔽边缘反光
+MASK_EXPAND = 10  # 黑名单遮罩向外膨胀的像素，彻底屏蔽边缘反光
 
 # 圆柱体的 HSV 颜色范围 (参考原 rect_recognize.py)
 CYLINDER_COLORS = {
@@ -46,13 +46,13 @@ TARGET_HSV_RANGES = {
 }
 TARGET_COLORS_BGR = {"Red": (0, 0, 255), "Green": (0, 255, 0), "Blue": (255, 0, 0)}
 
-TOL_SQUARE = 15
-TOL_SIZE = 15
-TOL_TRIANGLE = 20
-MASK_SCALE = 1.25
-MEDIAN_KSIZE = 5
-TOL_TRIANGLE_TRACK = 8
-MAX_TRI_FAIL = 7
+TOL_SQUARE = 40
+TOL_SIZE = 40
+TOL_TRIANGLE = 25
+MASK_SCALE = 1.5
+MEDIAN_KSIZE = 9
+TOL_TRIANGLE_TRACK = 15
+MAX_TRI_FAIL = 8
 
 
 def get_distance(p1, p2):
@@ -133,6 +133,7 @@ class IntegratedTracker:
 
         # 核心：物理黑名单遮罩 (0为排除区域，255为保留区域)
         self.exclusion_mask = None
+        self.cylinder_regions = None  # {name: (x, y, w, h, cx, cy)}
 
         # 靶标模板状态
         self.ref_frame = None
@@ -166,6 +167,20 @@ class IntegratedTracker:
             mask = cv2.bitwise_or(mask, cv2.inRange(hsv, ranges[1][0], ranges[1][1]))
         mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones((5, 5), np.uint8))
         return cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones((5, 5), np.uint8))
+
+    def _draw_cylinder_overlays(self, vis, alpha=0.35):
+        """以半透明彩色绘制圆柱体遮罩区域（红、绿、蓝）"""
+        if self.cylinder_regions is None:
+            return vis
+        overlay = vis.copy()
+        for name, (x, y, w, h, _, _) in self.cylinder_regions.items():
+            color_bgr = TARGET_COLORS_BGR[name]
+            x1 = max(0, x - MASK_EXPAND)
+            y1 = max(0, y - MASK_EXPAND)
+            x2 = min(vis.shape[1], x + w + MASK_EXPAND)
+            y2 = min(vis.shape[0], y + h + MASK_EXPAND)
+            cv2.rectangle(overlay, (x1, y1), (x2, y2), color_bgr, -1)
+        return cv2.addWeighted(vis, 1 - alpha, overlay, alpha, 0)
 
     def calibrate_environment(self):
         """阻塞循环，基于深度和颜色识别三个圆柱体，生成全局物理黑名单遮罩"""
@@ -212,7 +227,12 @@ class IntegratedTracker:
                 if best_rect:
                     current_rects[name] = best_rect
                     x, y, w, h = best_rect
-                    cv2.rectangle(vis, (x, y), (x+w, y+h), (0, 165, 255), 2)  # 橘色框代表检测到的圆柱体
+                    color_bgr = TARGET_COLORS_BGR[name]
+                    cv2.rectangle(vis, (x, y), (x+w, y+h), color_bgr, 2)
+                    # 半透明填充遮罩区域
+                    overlay = vis.copy()
+                    cv2.rectangle(overlay, (x, y), (x+w, y+h), color_bgr, -1)
+                    vis = cv2.addWeighted(vis, 0.7, overlay, 0.3, 0)
 
             # 稳定性验证
             if len(current_rects) == 3:
@@ -229,6 +249,15 @@ class IntegratedTracker:
                                 is_stable = False; break
                     
                     if is_stable:
+                        # 存储并打印每个圆柱体的区域和中心坐标
+                        self.cylinder_regions = {}
+                        print("\n" + "=" * 50)
+                        print("  圆柱体环境标定完成！各圆柱体信息：")
+                        for name, (x, y, w, h) in history[-1].items():
+                            cx, cy = x + w // 2, y + h // 2
+                            self.cylinder_regions[name] = (x, y, w, h, cx, cy)
+                            print(f"  [{name}]  区域: x={x}, y={y}, w={w}, h={h}  |  中心: ({cx}, {cy})")
+                        print("=" * 50 + "\n")
                         # === 生成反向黑名单遮罩 ===
                         # 初始全为白(255)，遇到圆柱体涂黑(0)
                         self.exclusion_mask = np.ones(frame.shape[:2], dtype=np.uint8) * 255
@@ -270,9 +299,7 @@ class IntegratedTracker:
             final_targets = self._find_target_candidates(edges)
             identified = self._identify_target_colors(frame, final_targets)
 
-            vis = frame.copy()
-            # 顺便把黑名单区域半透明涂黑，方便调试观察
-            vis[self.exclusion_mask == 0] = vis[self.exclusion_mask == 0] * 0.3
+            vis = self._draw_cylinder_overlays(frame.copy())
             cv2.putText(vis, "Waiting for constellation geometry...", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
             cv2.imshow("Target Initialization", vis)
             cv2.waitKey(1)
@@ -446,9 +473,7 @@ class IntegratedTracker:
                         self.consecutive_tri_fail = 0
 
             # 可视化绘制
-            vis = frame.copy()
-            # 绘制阴影覆盖的黑名单区域
-            vis[self.exclusion_mask == 0] = vis[self.exclusion_mask == 0] * 0.3
+            vis = self._draw_cylinder_overlays(frame.copy())
             
             if tracking_success:
                 cv2.putText(vis, f"ROBUST TRACKING | Rot: {rot_angle:.1f}deg", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)

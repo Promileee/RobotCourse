@@ -13,7 +13,7 @@ import os
 
 # ============== 配置区 ==============
 # 在这里填入你保存的数据文件夹相对路径
-RECORD_DIR = "record_2026xxxx_xxxxxx"  
+RECORD_DIR = r"debug\record_20260603_162503"  
 # ====================================
 
 def main():

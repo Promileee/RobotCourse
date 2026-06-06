@@ -14,7 +14,7 @@
 
 import cv2
 import numpy as np
-from backup_2026_06_05.camera_manager import CameraManager
+from camera_manager import CameraManager
 
 
 class LaserRecognizer:

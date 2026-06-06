@@ -21,7 +21,7 @@ import numpy as np
 import time
 
 from backup_2026_06_05.camera_manager import CameraManager
-from backup_2026_06_05.laser_recognize import LaserRecognizer
+from laser_recognize import LaserRecognizer
 from backup_2026_06_05.motor_control import MotorController
 from backup_2026_06_05.target_recognize import TargetRecognizer
 

@@ -23,7 +23,7 @@
 import cv2
 import numpy as np
 import math
-from backup_2026_06_05.camera_manager import CameraManager
+from camera_manager import CameraManager
 
 
 class TemporalFilterTracker:
@@ -86,7 +86,8 @@ class LaserRecognizer:
     """激光点综合识别器"""
 
     def __init__(self, depth_max=1300, tophat_size=15, min_area=5, max_area=200, 
-                 min_circularity=0.4, alpha=0.4, max_jump=60):
+                 min_circularity=0.4, alpha=0.4, max_jump=60, 
+                 min_peak=40, min_brightness=120): # 新增两个抗噪底线参数
         # 相机与深度参数
         self.cam = None
         self.depth_max = depth_max
@@ -96,6 +97,10 @@ class LaserRecognizer:
         self.min_area = min_area
         self.max_area = max_area
         self.min_circularity = min_circularity
+        
+        # 亮度抗噪阈值
+        self.min_peak = min_peak           # 顶帽变换的最小局部反差
+        self.min_brightness = min_brightness # 原图中的最低绝对亮度
         
         # 实例化时域追踪器
         self.tracker = TemporalFilterTracker(alpha=alpha, max_jump=max_jump)
@@ -124,14 +129,21 @@ class LaserRecognizer:
         return mask
 
     def detect_bright_spots(self, frame):
-        """核心视觉算法：顶帽变换 + 几何特征过滤"""
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        
-        # 1. 顶帽变换：提取局部高光，消除大面积环境光和绝对亮度差异
+        """核心视觉算法：顶帽变换 + 绝对亮度校验 + 几何特征过滤"""
+        # gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        gray = frame[:, :, 2]  # 直接使用蓝色通道，通常激光点在蓝色通道更亮
+
+        # 1. 顶帽变换：提取局部高光
         kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (self.tophat_size, self.tophat_size))
         top_hat = cv2.morphologyEx(gray, cv2.MORPH_TOPHAT, kernel)
 
-        # 2. 极低固定阈值二值化 (因为背景已由顶帽清零)
+        # =================【防伪核心 1：反差门神】=================
+        # 如果画面中最"凸起"的亮点都不够亮，说明根本没开激光，或者激光在视野外
+        min_val, max_val, min_loc, max_loc = cv2.minMaxLoc(top_hat)
+        if max_val < self.min_peak:
+            return np.zeros_like(gray)
+
+        # 2. 极低固定阈值二值化 (针对明显的局部凸起)
         _, thresh = cv2.threshold(top_hat, 30, 255, cv2.THRESH_BINARY)
 
         # 3. 形态学开运算，消除极细微的杂讯
@@ -149,7 +161,16 @@ class LaserRecognizer:
                     # 计算圆度
                     circularity = (4 * np.pi * area) / (perimeter * perimeter)
                     if circularity > self.min_circularity:
-                        cv2.drawContours(valid_mask, [cnt], -1, 255, thickness=cv2.FILLED)
+                        
+                        # =================【防伪核心 2：绝对亮度门神】=================
+                        # 取出这个可疑轮廓在"原灰度图"里的像素，看看它的真实绝对亮度
+                        mask_cnt = np.zeros_like(gray)
+                        cv2.drawContours(mask_cnt, [cnt], -1, 255, thickness=cv2.FILLED)
+                        _, max_intensity, _, _ = cv2.minMaxLoc(gray, mask=mask_cnt)
+                        
+                        # 只有当它在真实世界里足够亮时，才承认它是激光
+                        if max_intensity > self.min_brightness:
+                            cv2.drawContours(valid_mask, [cnt], -1, 255, thickness=cv2.FILLED)
                         
         return valid_mask
 
@@ -175,22 +196,13 @@ class LaserRecognizer:
         return -1
 
     def process_frame(self, frame, dpt, depth_max=None):
-        """
-        处理单帧，并经过时域滤波，输出最终稳定坐标
-        返回: (可视化结果图, 最终识别二值图, (cx, cy, depth))
-        """
-        # 1. 深度图遮罩对齐
+        """处理单帧，并经过时域滤波，输出最终稳定坐标"""
         depth_mask = self.create_depth_mask(dpt, depth_max)
         if depth_mask.shape[:2] != frame.shape[:2]:
             depth_mask = cv2.resize(depth_mask, (frame.shape[1], frame.shape[0]))
 
-        # 2. 视觉特征提取
         bright_mask = self.detect_bright_spots(frame)
-
-        # 3. 空间域融合 (视觉特征 ∩ 有效深度)
         combined = cv2.bitwise_and(bright_mask, depth_mask)
-
-        # 4. 获取当前帧测量结果
         raw_spot_2d = self._find_best_raw_spot(combined)
         
         measurement = None
@@ -199,35 +211,33 @@ class LaserRecognizer:
             d_val = self.get_depth_at(dpt, cx, cy)
             measurement = (cx, cy, d_val)
 
-        # 5. 时域滤波与异常点剔除
         filtered_spot = self.tracker.update(measurement)
 
-        # 6. 可视化绘制
         result = frame.copy()
         if filtered_spot is not None:
             fcx, fcy, fd = filtered_spot
-            # 绘制滤波后的稳定绿圈
             cv2.circle(result, (fcx, fcy), 15, (0, 255, 0), 2)
             cv2.circle(result, (fcx, fcy), 3, (0, 255, 0), -1)
             cv2.putText(result, f"({fcx}, {fcy}) D:{fd:.0f}mm", 
                         (fcx + 20, fcy - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
             
-            # (可选) 绘制浅红色的测量点，方便调试时观察噪点偏移
             if measurement is not None:
                 rcx, rcy, _ = measurement
                 cv2.circle(result, (rcx, rcy), 2, (0, 0, 255), -1)
+        else:
+            # 明确在画面上提示当前无激光
+            cv2.putText(result, "NO LASER DETECTED", (10, 30), 
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
 
         return result, combined, filtered_spot
 
     def visualize_depth(self, dpt, depth_max=None):
-        """生成深度伪彩图"""
         if depth_max is None:
             depth_max = self.depth_max
         vis = cv2.normalize(np.clip(dpt, 0, depth_max), None, 0, 255, cv2.NORM_MINMAX, dtype=cv2.CV_8U)
         return cv2.applyColorMap(vis, cv2.COLORMAP_JET)
 
     def release(self):
-        """释放资源"""
         if self.cam is not None:
             self.cam.release()
             self.cam = None
@@ -244,10 +254,14 @@ if __name__ == "__main__":
     lr.setup(cam)
 
     cv2.namedWindow("Result")
-    # 添加便于动态调参的滑动条
+    # 添加防伪底线的调参滑动条
     cv2.createTrackbar("TopHatSize", "Result", 15, 50, lambda _: None)
-    cv2.createTrackbar("MinCircular", "Result", 40, 100, lambda _: None) # 除以100即为0.4
+    cv2.createTrackbar("MinCircular", "Result", 40, 100, lambda _: None) 
     cv2.createTrackbar("DepthMax_mm", "Result", 1300, 5000, lambda _: None)
+    
+    # 新增：调节抗噪防伪底线
+    cv2.createTrackbar("MinPeak", "Result", 40, 150, lambda _: None)       # 控制局部反差底线
+    cv2.createTrackbar("MinBrightness", "Result", 120, 255, lambda _: None) # 控制绝对亮度底线
 
     while True:
         frame = lr.read_rgb_frame()
@@ -261,16 +275,18 @@ if __name__ == "__main__":
         lr.tophat_size = t_size if t_size % 2 == 1 else t_size + 1
         lr.min_circularity = cv2.getTrackbarPos("MinCircular", "Result") / 100.0
         depth_max = cv2.getTrackbarPos("DepthMax_mm", "Result")
+        
+        # 实时更新抗噪底线
+        lr.min_peak = cv2.getTrackbarPos("MinPeak", "Result")
+        lr.min_brightness = cv2.getTrackbarPos("MinBrightness", "Result")
 
         # 核心处理
         result, combined, spot = lr.process_frame(frame, dpt, depth_max)
         
-        # 获取基础图以便对比显示
         depth_mask = lr.create_depth_mask(dpt, depth_max)
         if depth_mask.shape[:2] != frame.shape[:2]:
             depth_mask = cv2.resize(depth_mask, (frame.shape[1], frame.shape[0]))
 
-        # 显示
         cv2.imshow("Result", result)
         cv2.imshow("Combined Valid Mask", combined)
 

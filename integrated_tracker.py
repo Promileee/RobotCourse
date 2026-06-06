@@ -18,7 +18,7 @@
 import cv2
 import numpy as np
 import math
-from backup_2026_06_05.camera_manager import CameraManager
+from camera_manager import CameraManager
 
 # ==========================================
 # 参数配置

@@ -4,18 +4,20 @@
 用于识别和追踪红、绿、蓝三色靶标构成的等边三角形成像星座。
 
 使用方法:
+    from camera_manager import CameraManager
     from target_recognize import TargetRecognizer
+
+    cam = CameraManager()
+    cam.start()
     tr = TargetRecognizer()
-    tr.setup()
-    targets = tr.capture_initial_targets()   # Phase 1: 严苛初始化捕获
-    tr.build_template(targets)               # Phase 2: 构建ORB模板
-    tr.track_loop()                          # Phase 3: 实时追踪
+    tr.setup(cam)
+    tr.run_full_pipeline()
 """
 
 import cv2
 import numpy as np
 import math
-from openni import openni2
+from backup_2026_06_05.camera_manager import CameraManager
 
 
 # ==========================================
@@ -25,9 +27,10 @@ TOL_SQUARE = 15
 TOL_SIZE = 15
 TOL_TRIANGLE = 20
 MASK_SCALE = 1.25
+MEDIAN_KSIZE = 5
 MAX_FRAME_SHIFT = 10
 MAX_FRAME_SHIFT_RELAX = 20
-TOL_TRIANGLE_TRACK = 5
+TOL_TRIANGLE_TRACK = 8
 MAX_TRI_FAIL = 7
 
 
@@ -73,9 +76,7 @@ class TargetRecognizer:
     """靶标识别与追踪器"""
 
     def __init__(self):
-        self.cap = None
-        self.dev = None
-        self.depth_stream = None
+        self.cam = None
         self.orb = cv2.ORB_create(nfeatures=500, scaleFactor=1.2, nlevels=8, edgeThreshold=15)
         self.matcher = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=True)
         self.kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
@@ -109,40 +110,23 @@ class TargetRecognizer:
     # ==========================================
     # 相机管理
     # ==========================================
-    def setup(self, skip_n=5):
-        """初始化相机并跳过初始帧以稳定传感器"""
-        print("正在初始化相机...")
-        openni2.initialize()
-        self.dev = openni2.Device.open_any()
-        self.depth_stream = self.dev.create_depth_stream()
-        self.depth_stream.start()
-
-        self.cap = cv2.VideoCapture(0)
-        if not self.cap.isOpened():
-            raise RuntimeError("无法打开RGB摄像头")
-
-        print(f"正在跳过前{skip_n}帧以稳定传感器...")
-        for _ in range(skip_n):
-            self.cap.read()
-            self.depth_stream.read_frame()
-            cv2.waitKey(100)
+    def setup(self, camera_manager=None):
+        """绑定相机管理器。若为 None 则自动创建一个 (独立调试用)。"""
+        if self.cam is not None:
+            return  # 已绑定，避免重复初始化
+        if camera_manager is None:
+            self.cam = CameraManager()
+            self.cam.start()
+        else:
+            self.cam = camera_manager
 
     def read_rgb_frame(self):
-        """读取RGB帧"""
-        ret, frame = self.cap.read()
-        if not ret:
-            return None
-        return frame
+        """读取RGB帧 (委托给 CameraManager)"""
+        return self.cam.read_rgb_frame()
 
     def get_depth_map(self):
-        """读取深度帧并返回深度图"""
-        depth_frame = self.depth_stream.read_frame()
-        dframe_data = np.array(depth_frame.get_buffer_as_triplet()).reshape([480, 640, 2])
-        dpt1 = np.asarray(dframe_data[:, :, 0], dtype="float32")
-        dpt2 = np.asarray(dframe_data[:, :, 1], dtype="float32")
-        dpt2 *= 255
-        dpt = dpt1 + dpt2
-        return dpt[:, ::-1]
+        """读取深度帧并返回深度图 (委托给 CameraManager)"""
+        return self.cam.get_depth_map()
 
     # ==========================================
     # 图像预处理
@@ -150,7 +134,7 @@ class TargetRecognizer:
     def preprocess(self, frame):
         """对帧进行自适应二值化 + 形态学去噪"""
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        gray = cv2.medianBlur(gray, 2)
+        gray = cv2.medianBlur(gray, MEDIAN_KSIZE)
         binary = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
                                        cv2.THRESH_BINARY, 11, 2)
         binary = cv2.morphologyEx(binary, cv2.MORPH_OPEN, self.kernel)
@@ -324,7 +308,7 @@ class TargetRecognizer:
 
         # 提取参考特征
         ref_gray = cv2.cvtColor(self.ref_frame, cv2.COLOR_BGR2GRAY)
-        ref_gray = cv2.medianBlur(ref_gray, 2)
+        ref_gray = cv2.medianBlur(ref_gray, MEDIAN_KSIZE)
         self.ref_binary = cv2.adaptiveThreshold(ref_gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
                                                  cv2.THRESH_BINARY, 11, 2)
         self.ref_binary = cv2.morphologyEx(self.ref_binary, cv2.MORPH_OPEN, self.kernel)
@@ -517,19 +501,19 @@ class TargetRecognizer:
         self.release()
 
     def release(self):
-        """释放所有资源"""
-        if self.cap is not None:
-            self.cap.release()
-        if self.depth_stream is not None:
-            self.depth_stream.stop()
-        if self.dev is not None:
-            self.dev.close()
-        cv2.destroyAllWindows()
+        """释放相机资源 (委托给 CameraManager)"""
+        if self.cam is not None:
+            self.cam.release()
+            self.cam = None
 
 
 # ==========================================
 # 调试入口
 # ==========================================
 if __name__ == "__main__":
+    cam = CameraManager()
+    cam.start()
+
     tr = TargetRecognizer()
+    tr.setup(cam)
     tr.run_full_pipeline()

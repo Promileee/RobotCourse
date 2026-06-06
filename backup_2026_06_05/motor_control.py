@@ -62,7 +62,7 @@ class MotorController:
         if self.ser is None:
             raise RuntimeError("串口未连接，请先调用 connect()")
         return self._send_command(f"1,{pan_angle},{tilt_angle}")
-
+    
     def set_velocity(self, pan_speed, tilt_speed):
         """模式2: 闭环速度控制（度/秒）"""
         if self.ser is None:

@@ -2,57 +2,47 @@
 激光点识别模块
 结合RGB相机亮度检测和深度相机的距离信息，识别激光点位置。
 使用方法:
+    from camera_manager import CameraManager
     from laser_recognize import LaserRecognizer
+
+    cam = CameraManager()
+    cam.start()
     lr = LaserRecognizer()
-    lr.setup()
-    result = lr.process_frame(rgb_frame, depth_map)
+    lr.setup(cam)
+    result, combined, spot = lr.process_frame(frame, dpt)
 """
 
-from openni import openni2
 import cv2
 import numpy as np
+from backup_2026_06_05.camera_manager import CameraManager
 
 
 class LaserRecognizer:
     """激光点识别器"""
 
-    def __init__(self, depth_max=1300, thresh_val=235, blur_size=3):
+    def __init__(self, depth_max=1300, thresh_val=240, blur_size=8):
         self.depth_max = depth_max
         self.thresh_val = thresh_val
         self.blur_size = blur_size if blur_size % 2 == 1 else blur_size + 1
-        self.cap = None
-        self.dev = None
-        self.depth_stream = None
+        self.cam = None
 
-    def setup(self):
-        """初始化RGB和深度相机"""
-        self.cap = cv2.VideoCapture(0)
-        if not self.cap.isOpened():
-            raise RuntimeError("Cannot open RGB camera")
-
-        openni2.initialize()
-        self.dev = openni2.Device.open_any()
-        print(self.dev.get_device_info())
-        self.depth_stream = self.dev.create_depth_stream()
-        self.depth_stream.start()
-
-    def get_depth_map(self):
-        """读取深度帧并返回深度图 (mm)"""
-        depth_frame = self.depth_stream.read_frame()
-        dframe_data = np.array(depth_frame.get_buffer_as_triplet()).reshape([480, 640, 2])
-        dpt1 = np.asarray(dframe_data[:, :, 0], dtype="float32")
-        dpt2 = np.asarray(dframe_data[:, :, 1], dtype="float32")
-        dpt2 *= 255
-        dpt = dpt1 + dpt2
-        dpt = dpt[:, ::-1]
-        return dpt
+    def setup(self, camera_manager=None):
+        """绑定相机管理器。若为 None 则自动创建一个 (独立调试用)。"""
+        if self.cam is not None:
+            return  # 已绑定，避免重复初始化
+        if camera_manager is None:
+            self.cam = CameraManager()
+            self.cam.start()
+        else:
+            self.cam = camera_manager
 
     def read_rgb_frame(self):
-        """读取RGB帧"""
-        ret, frame = self.cap.read()
-        if not ret or frame is None:
-            return None
-        return frame
+        """读取RGB帧 (委托给 CameraManager)"""
+        return self.cam.read_rgb_frame()
+
+    def get_depth_map(self):
+        """读取深度帧并返回深度图 (委托给 CameraManager)"""
+        return self.cam.get_depth_map()
 
     def create_depth_mask(self, dpt, depth_max=None):
         """创建深度遮罩：有效距离内的像素为255"""
@@ -140,22 +130,21 @@ class LaserRecognizer:
         return cv2.applyColorMap(vis, cv2.COLORMAP_JET)
 
     def release(self):
-        """释放所有相机资源"""
-        if self.cap is not None:
-            self.cap.release()
-        if self.depth_stream is not None:
-            self.depth_stream.stop()
-        if self.dev is not None:
-            self.dev.close()
-        cv2.destroyAllWindows()
+        """释放相机资源 (委托给 CameraManager)"""
+        if self.cam is not None:
+            self.cam.release()
+            self.cam = None
 
 
 # ==========================================
 # 调试入口
 # ==========================================
 if __name__ == "__main__":
+    cam = CameraManager()
+    cam.start()
+
     lr = LaserRecognizer()
-    lr.setup()
+    lr.setup(cam)
 
     cv2.namedWindow("Result")
     cv2.createTrackbar("Threshold", "Result", 235, 255, lambda _: None)

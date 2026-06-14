@@ -1,0 +1,56 @@
+{
+    "files.autoSave": "onWindowChange",
+    //"python.defaultInterpreterPath": "D:\\software\\anaconda3\\python.exe",
+    "notebook.output.textLineLimit": 50,
+    "notebook.output.linkifyFilePaths": false,
+    "workbench.editor.enablePreview": false,
+    "workbench.colorTheme": "One Dark Modern",
+    "vscode-office.pasterImgPath": "${fileName}.assets/${now}.png",
+    "comments.openView": "never",
+    "vscode-office.openOutline": false,
+    "chat.viewSessions.orientation": "stacked",
+    "claudeCode.enableNewConversationShortcut": true,
+
+
+//*************************上面的部分可根据自己需要保留配置，以下部分直接复制粘贴即可******************************
+    "claudeCode.environmentVariables": [
+        
+      
+        {
+            "name": "ANTHROPIC_BASE_URL",
+            "value": "https://api.deepseek.com/anthropic"
+        },
+        {
+            "name": "ANTHROPIC_AUTH_TOKEN",
+            "value": "sk-4e4a27bbf202481c8fb8c75a6bebb3b1" //换上你自己申请的API 密钥*****************************************
+        },
+        {
+            "name": "API_TIMEOUT_MS",
+            "value": "600000"
+        },
+        {
+            "name": "ANTHROPIC_MODEL",
+            "value": "deepseek-v4-pro"
+        },
+        {
+            "name": "ANTHROPIC_SMALL_FAST_MODEL",
+            "value": "deepseek-v4-flash"
+        },
+        {
+            "name": "ANTHROPIC_DEFAULT_OPUS_MODEL",
+            "value": "deepseek-v4-pro"
+        },
+        {
+            "name": "ANTHROPIC_DEFAULT_SONNET_MODEL",
+            "value": "deepseek-v4-pro"
+        },
+        {
+            "name": "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+            "value": "deepseek-v4-flash"
+        }
+  ],
+"claudeCode.preferredLocation": "panel",
+"git.openRepositoryInParentFolders": "never",
+"git.enableSmartCommit": true,
+"git.confirmSync": false
+}

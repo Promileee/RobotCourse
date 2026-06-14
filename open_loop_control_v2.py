@@ -210,7 +210,7 @@ class OpenLoopController:
     def __init__(self,
                  serial_port='COM7',
                  serial_baud=9600,
-                 pan_range=(1.0, 18.0),
+                 pan_range=(-10.0, 8.0),
                  tilt_range=(-3.0, 12.0),
                  num_calib_points=16,
                  settle_time=2.0,
@@ -734,7 +734,7 @@ class OpenLoopController:
 def main():
     ctrl = OpenLoopController(
         serial_port='COM7',
-        pan_range=(1.0, 18.0),
+        pan_range=(-8.0, 8.0),
         tilt_range=(-3.0, 11.0),
         num_calib_points=16,
         track_interval=5.0,

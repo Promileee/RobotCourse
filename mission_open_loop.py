@@ -50,7 +50,7 @@ def phase1_read_qr(cam):
         sequence: ['Red', 'Green', 'Blue'] 或 None
         raw_data: 原始二维码字符串
     """
-    QR_WAIT_AFTER = 10.0  # 识别成功后等待，确保二维码及人手撤出视野
+    QR_WAIT_AFTER = 5.0   # 识别成功后等待，确保二维码及人手撤出视野
 
     qr = QRCodeRecognizer()
     print("\n" + "=" * 60)

@@ -1,105 +1,111 @@
-# 智能机器人挑战性实践 —— 视觉引导激光指向系统
+# Intelligent Robot Challenging Practice — Vision-Guided Laser Pointing System
 
-本仓库存储《智能机器人挑战性实践》课程实验的全部程序代码。项目构建了一套**视觉引导的激光指向系统**，以 RGB-D 摄像头为感知元件、Arduino 驱动的二维云台为执行元件，实现激光光点按 QR 码指定的颜色序列依次指向对应圆柱物料和正方形靶标。
+> [中文版本 (Chinese Version)](README_cn.md)
 
-## 系统架构
+This repository contains all program code for the **Intelligent Robot Challenging Practice** course experiment. The project builds a **vision-guided laser pointing system** that uses an RGB-D camera as the sensing element and an Arduino-driven 2-axis gimbal as the actuator, directing a laser spot to sequentially point at corresponding cylindrical materials and square targets in the color sequence specified by a QR code.
 
-采用"**上位机（PC/Python） + 下位机（Arduino）**"两级架构：
+## System Architecture
 
-- **上位机**：承担全部视觉算法和高层决策，通过 USB 虚拟串口（9600 bps）向 Arduino 发送指令
-- **下位机**：驱动两台步进电机（16 微步细分，3200 步/转），分别控制云台的 Pan（水平）和 Tilt（俯仰）轴
-- **摄像头**：乐视 RGB-D 摄像头，通过 ZeroMQ PUB-SUB 模式独立为后台服务进程，供多个消费者程序复用
+A **host PC (Python) + microcontroller (Arduino)** two-tier architecture:
 
-## 项目结构
+- **Host PC**: Handles all vision algorithms and high-level decision-making, sending commands to Arduino via USB virtual serial port (9600 bps)
+- **Microcontroller (Arduino)**: Drives two stepper motors (16 micro-step subdivision, 3200 steps/rev) controlling the gimbal's Pan (horizontal) and Tilt (pitch) axes
+- **Camera**: Orbbec RGB-D camera, decoupled as a background service process via ZeroMQ PUB-SUB pattern, shared by multiple consumer programs
 
-### 相机与数据基础设施
+## Project Structure
 
-| 文件 | 说明 |
-|------|------|
-| `camera_manager.py` | 统一相机管理模块（ZMQ 客户端），订阅服务端发布的 RGB + 深度数据 |
-| `server_live.py` | 硬件实时发布服务端，连接实体摄像头并广播数据 |
-| `server_playback.py` | 离线回放服务端，读取本地录制的数据伪装为实时流 |
-| `record_data_v1.py` | 数据录制程序，将 RGB 帧存为 avi、深度帧存为 npz |
+### Camera & Data Infrastructure
 
-### 视觉识别模块
+| File | Description |
+| ---- | ----------- |
+| `camera_manager.py` | Unified camera manager (ZMQ client), subscribes to RGB + depth data published by the server |
+| `server_live.py` | Real-time hardware server, connects to physical cameras and broadcasts data |
+| `server_playback.py` | Offline playback server, reads locally recorded data and emulates a live stream |
+| `record_data_v1.py` | Data recording utility, saves RGB frames as AVI and depth frames as NPZ |
 
-| 文件 | 说明 |
-|------|------|
-| `QR_code_recognize_v1.py` | 二维码识别模块，基于 OpenCV QRCodeDetector，解析颜色执行序列（1=红, 2=绿, 3=蓝） |
-| `rect_recognize.py` | 圆柱物料识别模块，基于 HSV 颜色空间分割 + 深度信息联合验证，检测红/绿/蓝三色圆柱体 |
-| `target_recognize.py` | 靶标识别基类，基于 ORB 特征匹配 + 刚体几何约束（正方形/等边三角形）的三阶段追踪管线 |
-| `target_recognize_v1.py` | 靶标识别 V1，在基类基础上加入时域滤波（EMA 平滑 + 异常帧剔除） |
-| `target_recognize_v2.py` | 靶标识别 V2，增加滑动窗口中值滤波 + 恒速卡尔曼滤波，平滑 ORB 误匹配产生的飞点 |
-| `laser_recognize.py` | 激光光斑检测基类，基于灰度亮度阈值 + 深度距离过滤 |
-| `laser_recognize_v3.py` | 激光检测 V3，增加深度邻域搜索（补偿 RGB-D 视差）、多通道联合判决（灰度+V 通道）、多候选关联跟踪与评分 |
+### Vision Recognition Modules
 
-### 控制模块
+| File | Description |
+| ---- | ----------- |
+| `QR_code_recognize_v1.py` | QR code recognition using OpenCV QRCodeDetector, parses color execution sequence (1=Red, 2=Green, 3=Blue) |
+| `rect_recognize.py` | Cylindrical material detection via HSV color space segmentation + depth information joint verification, detects red/green/blue cylinders |
+| `target_recognize.py` | Target recognition base class, three-stage tracking pipeline using ORB feature matching + rigid-body geometric constraints (square / equilateral triangle) |
+| `target_recognize_v1.py` | Target recognition V1, adds temporal filtering (EMA smoothing + outlier frame rejection) on top of the base class |
+| `target_recognize_v2.py` | Target recognition V2, adds sliding-window median filter + constant-velocity Kalman filter to smooth ORB mismatching flyers |
+| `laser_recognize.py` | Laser spot detection base class, using grayscale brightness threshold + depth distance filtering |
+| `laser_recognize_v3.py` | Laser detection V3, adds depth neighborhood search (compensating RGB-D parallax), dual-channel joint brightness verification (grayscale + HSV-V), multi-candidate association tracking with scoring |
 
-| 文件 | 说明 |
-|------|------|
-| `motor_control.py` | 电机串口控制模块，支持三种模式：复位归零（模式0）、开环位置控制（模式1）、闭环速度控制（模式2） |
-| `open_loop_control_v2.py` | 开环控制器，在角度空间均匀网格采样 → 训练 MLP 神经网络（2×32×16×2）→ 建立像素到电机角度的非线性映射 |
-| `close_loop_control_v2.py` | 闭环控制器 V2（类封装版），PD 速度伺服控制 + 加速度限制 + 稳定性判定，支持灵活的颜色指定 |
+### Control Modules
 
-### 主任务程序
+| File | Description |
+| ---- | ----------- |
+| `motor_control.py` | Motor serial communication module, supports three modes: homing reset (Mode 0), open-loop position control (Mode 1), closed-loop velocity control (Mode 2) |
+| `open_loop_control_v2.py` | Open-loop controller, uniform grid sampling in angle space → MLP neural network training (2×32×16×2) → establishes nonlinear pixel-to-motor-angle mapping |
+| `close_loop_control_v2.py` | Closed-loop controller V2 (class-based), PD velocity servo + acceleration limiting + stability判定, supports flexible color specification |
 
-| 文件 | 说明 |
-|------|------|
-| **`mission_open_close_v1.py`** | **当前主程序** —— 混合策略：物料用纯开环指向，靶标用"开环粗略定位 + 闭环 PD 精准锁定"两阶段指向 |
-| `mission_open_close.py` | 混合策略初版（与 V1 核心逻辑相同，V1 在此基础上的优化版） |
-| `mission_open_loop_v3.py` | 纯开环版本 V3：物料开环 + 靶标持续追踪后开环指向 |
-| `mission_open_loop_v2.py` | 纯开环版本 V2：增加循环执行和电机复位 |
-| `mission_open_loop.py` | 纯开环版本初版 |
+### Mission Scripts (Main Programs)
 
-### 调试与辅助
+| File | Description |
+| ---- | ----------- |
+| **`mission_open_close_v1.py`** | **Current main program** — hybrid strategy: pure open-loop for materials, "open-loop coarse positioning + closed-loop PD fine locking" two-stage for targets |
+| `mission_open_close.py` | Initial hybrid version (same core logic as V1; V1 is the optimized successor) |
+| `mission_open_loop_v3.py` | Pure open-loop V3: open-loop for materials + continuous tracking then open-loop pointing for targets |
+| `mission_open_loop_v2.py` | Pure open-loop V2: adds loop execution and motor reset |
+| `mission_open_loop.py` | Pure open-loop initial version |
 
-| 目录/文件 | 说明 |
-|-----------|------|
-| `debug/` | 调试脚本、历史版本备份、录制数据样本、Gemini 辅助实验脚本、测试截图 |
-| `mission.md` | 项目任务简要说明 |
+### Debugging & Utilities
 
-## 核心工作流（mission_open_close_v1.py）
+| Path | Description |
+| ---- | ----------- |
+| `debug/` | Debug scripts, historical version backups, recorded data samples, Gemini-assisted experiment scripts, test screenshots |
+| `mission.md` | Brief project task description |
+
+## Core Workflow (mission_open_close_v1.py)
 
 ```
-初始化阶段（仅一次）:
-  1. 圆柱物料坐标识别（电机运动前执行，利用物料固定位置假设）
-  2. 电机串口连接与确认
-  3. 靶标 & 激光识别模块初始化（自动推算激光搜索 ROI）
-  4. 角度空间均匀网格采样 → 训练 MLP 神经网络（像素→角度映射）
+Initialization Phase (once):
+  1. Cylindrical material coordinate detection (before any motor movement,
+     leveraging the fixed-position assumption of materials)
+  2. Motor serial connection & confirmation
+  3. Target & laser recognition module initialization
+     (auto-compute laser search ROI from target spatial positions)
+  4. Uniform grid sampling in angle space → MLP neural network training
+     (pixel → angle mapping)
 
-循环执行阶段（每轮）:
-  1. 扫描 QR 码 → 获取颜色序列（如 红→绿→蓝）
-  2. 对每种颜色依次执行：
-     a. 物料指向（纯开环 NN 预测 + set_position）
-     b. 靶标重新识别（从零开始）
-     c. 靶标开环粗略定位（NN 预测 + set_position）
-     d. 靶标重新识别（适配新视角）
-     e. 闭环 PD 精准锁定（视觉反馈速度伺服，连续 15 帧在死区内即判定完成）
-  3. 全部颜色完成后电机复位，等待下一轮
+Cyclic Execution Phase (each round):
+  1. Scan QR code → obtain color sequence (e.g., Red → Green → Blue)
+  2. For each color in sequence:
+     a. Point to material (pure open-loop NN prediction + set_position)
+     b. Re-identify target (from scratch)
+     c. Coarse open-loop target positioning (NN prediction + set_position)
+     d. Re-identify target (adapt to new viewpoint)
+     e. Closed-loop PD fine locking (visual feedback velocity servo,
+        success when laser stays within dead zone for 15 consecutive frames)
+  3. Motor reset after all colors, wait for next round
 ```
 
-## 控制策略
+## Control Strategy
 
-- **物料指向**：纯开环 —— 物料尺寸大、指向精度要求宽松；圆盘外激光点识别困难
-- **靶标指向**：开环 + 闭环混合 —— 开环负责大范围快速迁移至靶标附近，闭环 PD 负责局部像素级精准锁定
-- **PD 参数**：Kp=0.15, Kd=0.06, 死区=5px, 速度上限=200°/s, 加速度上限=300°/s², 闭环超时=10s
+- **Material pointing**: Pure open-loop — materials are large with loose pointing precision requirements; laser spot detection is difficult outside the target disk region
+- **Target pointing**: Open-loop + Closed-loop hybrid — open-loop handles large-range rapid relocation near the target; closed-loop PD handles local pixel-level fine locking
+- **PD parameters**: Kp=0.15, Kd=0.06, dead zone=5 px, max speed=200 °/s, max acceleration=300 °/s², closed-loop timeout=10 s
 
-## 运行方式
+## How to Run
 
 ```bash
-# 1. 先启动摄像头服务端（二选一）
-python server_live.py       # 连接实体摄像头
-python server_playback.py   # 回放离线数据
+# 1. Start the camera server first (choose one)
+python server_live.py       # Connect to physical cameras
+python server_playback.py   # Play back offline recorded data
 
-# 2. 运行主程序
+# 2. Run the main program
 python mission_open_close_v1.py
 ```
 
-## 成员分工
+## Team
 
-- **王仁嘉**：相机数据传输架构、靶标识别与追踪算法、激光点检测算法、开环标定与神经网络映射、上位机主程序框架
-- **蒋维阳**：硬件连接与调试、二维码识别模块、Arduino 步进电机控制程序、闭环 PD 速度控制算法设计与参数整定
+- **Wang Renjia (王仁嘉)**: Camera data transmission architecture, target recognition & tracking algorithms, laser spot detection algorithms, open-loop calibration & neural network mapping, host PC main program framework
+- **Jiang Weiyang (蒋维阳)**: Hardware setup & debugging, QR code recognition module, Arduino stepper motor control firmware, closed-loop PD velocity control algorithm design & parameter tuning
 
-## 实验报告
+## Experiment Report
 
-详见 `实验报告.docx`（《智能机器人挑战性实践》实验方案总结报告），包含完整的算法原理推导、参数整定依据和运行性能量化指标。
+See `实验报告.docx` (Intelligent Robot Challenging Practice — Experiment Summary Report) for complete algorithm derivations, parameter tuning rationale, and quantitative performance metrics.
